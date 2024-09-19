@@ -21,7 +21,7 @@ def ai_assistant_tab(df_filtered):
             box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.1);
         }
         .main .block-container {
-            padding-bottom: 150px;  /* Adjust this value if needed */
+            padding-bottom: 200px;  /* Increased to accommodate code blocks */
         }
         </style>
         """, unsafe_allow_html=True)
@@ -29,7 +29,6 @@ def ai_assistant_tab(df_filtered):
 
     st.header("AI Assistant")
     st.write("Ask questions about your data, and the assistant will analyze it using Python code.")
-
 
     # Initialize OpenAI client using Streamlit secrets
     try:
@@ -39,9 +38,7 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Missing secret: {e}")
         st.stop()
 
-
     client = openai.Client(api_key=openai_api_key)
-
 
     try:
         assistant = client.beta.assistants.retrieve(assistant_id)
@@ -49,12 +46,10 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Failed to retrieve assistant: {e}")
         st.stop()
 
-
     # Convert dataframe to a CSV file using io.BytesIO
     csv_buffer = io.BytesIO()
     df_filtered.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)  # Reset buffer position to the start
-
 
     # Upload the CSV file as binary data
     try:
@@ -65,7 +60,6 @@ def ai_assistant_tab(df_filtered):
     except Exception as e:
         st.error(f"Failed to upload file: {e}")
         st.stop()
-
 
     # Update the assistant to include the file
     try:
@@ -81,7 +75,6 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Failed to update assistant with file resources: {e}")
         st.stop()
 
-
     # Initialize session state variables
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -93,10 +86,8 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to create thread: {e}")
             st.stop()
 
-
     # Create a container for the chat messages
     chat_container = st.container()
-
 
     # Display chat history in the container
     with chat_container:
@@ -110,19 +101,18 @@ def ai_assistant_tab(df_filtered):
                         st.write(message['content'], unsafe_allow_html=True)
                     if 'image' in message:
                         st.image(message['image'], use_column_width=True)
-
+                    if 'code' in message:
+                        st.code(message['code'], language='python')
 
     # User input
     if prompt := st.chat_input("Enter your question about the data"):
         # Add user message to chat history
         st.session_state.chat_history.append({'role': 'user', 'content': prompt})
 
-
         # Display the user's message immediately
         with chat_container:
             with st.chat_message("user"):
                 st.write(prompt)
-
 
         # Create a new message in the thread
         try:
@@ -135,22 +125,27 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to create message in thread: {e}")
             st.stop()
 
-
         # Define event handler to capture assistant's response
         class MyEventHandler(AssistantEventHandler):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.assistant_message = ""
-                # Create a placeholder for the assistant's message
+                self.code_content = ""
+
+                # Create placeholders
                 with chat_container:
                     with st.chat_message("assistant"):
                         self.content_placeholder = st.empty()
+                        self.code_placeholder = st.empty()
 
             def on_text_delta(self, delta: TextDelta, snapshot: Text, **kwargs):
-                if delta and delta.value:
-                    self.assistant_message += delta.value
-                    # Update the assistant's message content
-                    self.content_placeholder.markdown(self.assistant_message)
+                try:
+                    if delta and delta.value:
+                        self.assistant_message += delta.value
+                        # Update the assistant's message content
+                        self.content_placeholder.markdown(self.assistant_message)
+                except Exception as e:
+                    st.error(f"Error in on_text_delta: {e}")
 
             def on_image_file_done(self, image_file):
                 """
@@ -174,10 +169,46 @@ def ai_assistant_tab(df_filtered):
                 except Exception as e:
                     st.error(f"Failed to process image file: {e}")
 
+            def on_tool_call_created(self, tool_call):
+                """
+                Handle the creation of a tool call (e.g., code generation).
+                """
+                try:
+                    # Initialize code content
+                    self.code_content = ""
+                    # Create a new code container for streaming code
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            self.code_placeholder = st.empty()
+                except Exception as e:
+                    st.error(f"Failed to initialize code streaming: {e}")
+
+            def on_tool_call_delta(self, delta, snapshot):
+                """
+                Handle streaming code deltas.
+                """
+                try:
+                    if hasattr(delta, 'code_interpreter') and delta.code_interpreter and delta.code_interpreter.input:
+                        # Append the new code chunk
+                        self.code_content += delta.code_interpreter.input
+                        # Update the code placeholder with the new content
+                        self.code_placeholder.code(self.code_content, language='python')
+                except Exception as e:
+                    st.error(f"Error in on_tool_call_delta: {e}")
+
+            def on_tool_call_done(self, tool_call):
+                """
+                Handle the completion of a tool call.
+                """
+                try:
+                    # Finalize the code block if needed
+                    # Currently, code is already updated in on_tool_call_delta
+                    pass
+                except Exception as e:
+                    st.error(f"Failed to finalize code streaming: {e}")
 
         # Instantiate the event handler
         event_handler = MyEventHandler()
-
 
         # Run the assistant
         try:
@@ -192,10 +223,8 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to run assistant stream: {e}")
             st.stop()
 
-
         # Add assistant's message to chat history
         st.session_state.chat_history.append({'role': 'assistant', 'content': event_handler.assistant_message})
-
 
         # Handle any files generated by the assistant
         try:
@@ -216,6 +245,11 @@ def ai_assistant_tab(df_filtered):
                                 img_bytes = buffered.getvalue()
                                 # Append image to chat history
                                 st.session_state.chat_history[-1]['image'] = img_bytes
+                            elif attachment.filename.endswith('.py'):
+                                # Decode the code content
+                                code_str = file_content.decode('utf-8')
+                                # Append code to chat history
+                                st.session_state.chat_history[-1]['code'] = code_str
                             elif attachment.filename.endswith('.csv'):
                                 # Read CSV into a dataframe and append to chat history
                                 df = pd.read_csv(io.BytesIO(file_content))
