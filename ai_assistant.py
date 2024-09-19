@@ -1,9 +1,11 @@
 import io
+import base64
 import streamlit as st
 import pandas as pd
 import openai
 from openai import AssistantEventHandler
 from openai.types.beta.threads import Text, TextDelta
+from PIL import Image
 
 def ai_assistant_tab(df_filtered):
     # Custom CSS to make the input bar sticky
@@ -24,8 +26,10 @@ def ai_assistant_tab(df_filtered):
         </style>
         """, unsafe_allow_html=True)
 
+
     st.header("AI Assistant")
     st.write("Ask questions about your data, and the assistant will analyze it using Python code.")
+
 
     # Initialize OpenAI client using Streamlit secrets
     try:
@@ -35,7 +39,9 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Missing secret: {e}")
         st.stop()
 
+
     client = openai.Client(api_key=openai_api_key)
+
 
     try:
         assistant = client.beta.assistants.retrieve(assistant_id)
@@ -43,10 +49,12 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Failed to retrieve assistant: {e}")
         st.stop()
 
+
     # Convert dataframe to a CSV file using io.BytesIO
     csv_buffer = io.BytesIO()
     df_filtered.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)  # Reset buffer position to the start
+
 
     # Upload the CSV file as binary data
     try:
@@ -57,6 +65,7 @@ def ai_assistant_tab(df_filtered):
     except Exception as e:
         st.error(f"Failed to upload file: {e}")
         st.stop()
+
 
     # Update the assistant to include the file
     try:
@@ -72,6 +81,7 @@ def ai_assistant_tab(df_filtered):
         st.error(f"Failed to update assistant with file resources: {e}")
         st.stop()
 
+
     # Initialize session state variables
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -83,8 +93,10 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to create thread: {e}")
             st.stop()
 
+
     # Create a container for the chat messages
     chat_container = st.container()
+
 
     # Display chat history in the container
     with chat_container:
@@ -94,21 +106,23 @@ def ai_assistant_tab(df_filtered):
                     st.write(message['content'])
             else:
                 with st.chat_message("assistant"):
-                    st.write(message['content'])
-                    if 'attachments' in message:
-                        for attachment in message['attachments']:
-                            if attachment['type'] == 'image':
-                                st.image(attachment['content'])
+                    if 'content' in message:
+                        st.write(message['content'], unsafe_allow_html=True)
+                    if 'image' in message:
+                        st.image(message['image'], use_column_width=True)
+
 
     # User input
     if prompt := st.chat_input("Enter your question about the data"):
         # Add user message to chat history
         st.session_state.chat_history.append({'role': 'user', 'content': prompt})
 
+
         # Display the user's message immediately
         with chat_container:
             with st.chat_message("user"):
                 st.write(prompt)
+
 
         # Create a new message in the thread
         try:
@@ -121,17 +135,16 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to create message in thread: {e}")
             st.stop()
 
+
         # Define event handler to capture assistant's response
         class MyEventHandler(AssistantEventHandler):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.assistant_message = ""
-                self.attachments = []
-                # Create a placeholder for the assistant's message and attachments
+                # Create a placeholder for the assistant's message
                 with chat_container:
                     with st.chat_message("assistant"):
                         self.content_placeholder = st.empty()
-                        self.image_placeholder = st.container()
 
             def on_text_delta(self, delta: TextDelta, snapshot: Text, **kwargs):
                 if delta and delta.value:
@@ -139,26 +152,32 @@ def ai_assistant_tab(df_filtered):
                     # Update the assistant's message content
                     self.content_placeholder.markdown(self.assistant_message)
 
-            def on_image_file_done(self, image_file, **kwargs):
-                # Download the image file
-                image_data = client.files.content(image_file.file_id)
-                image_data_bytes = image_data.read()
-                # Display the image in the chat
-                with self.image_placeholder:
-                    st.image(image_data_bytes)
-                # Store the attachment in the message history
-                self.attachments.append({
-                    'type': 'image',
-                    'content': image_data_bytes
-                })
-                # Delete the file from OpenAI
-                client.files.delete(image_file.file_id)
+            def on_image_file_done(self, image_file):
+                """
+                Handle image files generated by the assistant.
+                """
+                try:
+                    # Download the image from OpenAI
+                    image_data = client.files.content(image_file.file_id).read()
+                    image = Image.open(io.BytesIO(image_data))
 
-            def on_tool_error(self, error, **kwargs):
-                st.error(f"Tool error: {error}")
+                    # Convert image to a format suitable for Streamlit
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_bytes = buffered.getvalue()
+
+                    # Display the image in the chat
+                    with chat_container:
+                        with st.chat_message("assistant"):
+                            st.image(img_bytes, use_column_width=True)
+
+                except Exception as e:
+                    st.error(f"Failed to process image file: {e}")
+
 
         # Instantiate the event handler
         event_handler = MyEventHandler()
+
 
         # Run the assistant
         try:
@@ -173,9 +192,37 @@ def ai_assistant_tab(df_filtered):
             st.error(f"Failed to run assistant stream: {e}")
             st.stop()
 
-        # Add assistant's message and attachments to chat history
-        st.session_state.chat_history.append({
-            'role': 'assistant',
-            'content': event_handler.assistant_message,
-            'attachments': getattr(event_handler, 'attachments', [])
-        })
+
+        # Add assistant's message to chat history
+        st.session_state.chat_history.append({'role': 'assistant', 'content': event_handler.assistant_message})
+
+
+        # Handle any files generated by the assistant
+        try:
+            messages = client.beta.threads.messages.list(thread_id=st.session_state.thread_id)
+            for message in messages.data:
+                if message.role == 'assistant' and hasattr(message, 'attachments') and message.attachments:
+                    for attachment in message.attachments:
+                        if attachment.object == 'file':
+                            file_id = attachment.file_id
+                            # Download the file
+                            file_content = client.files.content(file_id).read()
+                            # Check the file type and update chat history accordingly
+                            if attachment.filename.endswith(('.png', '.jpg', '.jpeg')):
+                                # Convert image bytes to displayable format
+                                image = Image.open(io.BytesIO(file_content))
+                                buffered = io.BytesIO()
+                                image.save(buffered, format="PNG")
+                                img_bytes = buffered.getvalue()
+                                # Append image to chat history
+                                st.session_state.chat_history[-1]['image'] = img_bytes
+                            elif attachment.filename.endswith('.csv'):
+                                # Read CSV into a dataframe and append to chat history
+                                df = pd.read_csv(io.BytesIO(file_content))
+                                st.session_state.chat_history[-1]['content'] += f"\n\n{df.to_html(index=False, escape=False)}"
+                            else:
+                                # Handle other file types as download buttons
+                                st.session_state.chat_history[-1]['content'] += f"\n\n[Download {attachment.filename}](data:file/{attachment.filename.split('.')[-1]};base64,{base64.b64encode(file_content).decode()})"
+        except Exception as e:
+            st.error(f"Failed to handle assistant's attachments: {e}")
+            st.stop()
